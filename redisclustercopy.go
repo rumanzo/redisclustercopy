@@ -80,6 +80,7 @@ func main() {
 	}
 	rdb1 := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:    []string{*redisSourceAddress},
+		ReadOnly: true,
 		Password: "", // no password set
 	})
 	rdb2 := redis.NewClusterClient(&redis.ClusterOptions{
@@ -104,6 +105,10 @@ func main() {
 		fmt.Printf("Error getting cluster slots: %v\n", err)
 	}
 	err = rdb1.ForEachMaster(context.Background(), func(ctx context.Context, master *redis.Client) error {
+		masterNodeID, err := master.Do(ctx, "CLUSTER", "MYID").Result()
+		if err != nil {
+			fmt.Printf("Error getting master node id: %v\n", err)
+		}
 		batchNum := 0
 		pipe := master.Pipeline()
 		cmdsVal := map[string]*redis.StringCmd{}
@@ -116,7 +121,7 @@ func main() {
 			for k, v := range cmdsVal {
 				val, err := v.Result()
 				if err != nil {
-					output <- fmt.Sprintf("Failed to get key %q: %v\n", k, err)
+					output <- fmt.Sprintf("Failed to get key %q (probably key not exists, expired): %v\n", k, err)
 					continue
 				}
 				ttl, err := cmdsTTL[k].Result()
@@ -131,17 +136,21 @@ func main() {
 		}
 
 		for _, clusterSlot := range slots {
-			for i := clusterSlot.Start; i < clusterSlot.End+1; i++ {
-				keysInSlot, _ := master.ClusterCountKeysInSlot(ctx, i).Result()
-				keys, err := master.ClusterGetKeysInSlot(ctx, i, int(keysInSlot)).Result()
-				if err != nil {
-					fmt.Printf("Error getting keys: %v\n", err)
-				}
-				for _, key := range keys {
-					batchNum++
-					cmdsVal[key], cmdsTTL[key] = pipe.Get(ctx, key), pipe.TTL(ctx, key)
-					if batchNum >= *batchSize {
-						batchExec()
+			for _, node := range clusterSlot.Nodes {
+				if node.ID == masterNodeID {
+					for i := clusterSlot.Start; i < clusterSlot.End+1; i++ {
+						keysInSlot, _ := master.ClusterCountKeysInSlot(ctx, i).Result()
+						keys, err := master.ClusterGetKeysInSlot(ctx, i, int(keysInSlot)).Result()
+						if err != nil {
+							fmt.Printf("Error getting keys: %v\n", err)
+						}
+						for _, key := range keys {
+							batchNum++
+							cmdsVal[key], cmdsTTL[key] = pipe.Get(ctx, key), pipe.TTL(ctx, key)
+							if batchNum >= *batchSize {
+								batchExec()
+							}
+						}
 					}
 				}
 			}
