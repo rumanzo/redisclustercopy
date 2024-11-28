@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"log"
+	"math/rand"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -27,7 +28,7 @@ func worker1(client *redis.ClusterClient, ctx context.Context, num chan string, 
 		for i := 0; i < *batchSize; i++ {
 			select {
 			case n := <-num:
-				pipeline.Set(context.Background(), "testkey"+n, "testval"+n, time.Duration(*ttl)*time.Second)
+				pipeline.Set(context.Background(), "testkey"+n, "testval"+n, time.Duration(rand.Intn(*ttl))*time.Second)
 				out <- true
 			case <-ctx.Done():
 				pipeExec()
@@ -50,7 +51,7 @@ func preparePrinter(output chan bool, total *int, batchSize *int) {
 }
 
 func main() {
-	ttl := flag.Int("ttl", 7200, "ttl of records")
+	ttl := flag.Int("maxttl", 7200, "ttl of records")
 	totalRecords := flag.Int("total", 10000000, "total records")
 	batchSize := flag.Int("batchSize", 1000, "batch size")
 	workers := flag.Int("workers", 10, "number of workers")

@@ -103,19 +103,14 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error getting cluster slots: %v\n", err)
 	}
-	rdb1.ForEachMaster(context.Background(), func(ctx context.Context, master *redis.Client) error {
-		clientInfo, err := master.ClientInfo(ctx).Result()
-		if err != nil {
-			fmt.Printf("Error getting client info: %v\n", err)
-		}
-
+	err = rdb1.ForEachMaster(context.Background(), func(ctx context.Context, master *redis.Client) error {
 		batchNum := 0
 		pipe := master.Pipeline()
 		cmdsVal := map[string]*redis.StringCmd{}
 		cmdsTTL := map[string]*redis.DurationCmd{}
 		batchExec := func() {
 			_, err = pipe.Exec(ctx)
-			if err != nil {
+			if err != nil && err != redis.Nil {
 				fmt.Printf("Failed to exec pipe: %v\n", err)
 			}
 			for k, v := range cmdsVal {
@@ -136,21 +131,17 @@ func main() {
 		}
 
 		for _, clusterSlot := range slots {
-			for _, client := range clusterSlot.Nodes {
-				if clientInfo.LAddr == client.Addr {
-					for i := clusterSlot.Start; i < clusterSlot.End+1; i++ {
-						keysInSlot, _ := master.ClusterCountKeysInSlot(ctx, i).Result()
-						keys, err := master.ClusterGetKeysInSlot(ctx, i, int(keysInSlot)).Result()
-						if err != nil {
-							fmt.Printf("Error getting keys: %v\n", err)
-						}
-						for _, key := range keys {
-							batchNum++
-							cmdsVal[key], cmdsTTL[key] = pipe.Get(ctx, key), pipe.TTL(ctx, key)
-							if batchNum >= *batchSize {
-								batchExec()
-							}
-						}
+			for i := clusterSlot.Start; i < clusterSlot.End+1; i++ {
+				keysInSlot, _ := master.ClusterCountKeysInSlot(ctx, i).Result()
+				keys, err := master.ClusterGetKeysInSlot(ctx, i, int(keysInSlot)).Result()
+				if err != nil {
+					fmt.Printf("Error getting keys: %v\n", err)
+				}
+				for _, key := range keys {
+					batchNum++
+					cmdsVal[key], cmdsTTL[key] = pipe.Get(ctx, key), pipe.TTL(ctx, key)
+					if batchNum >= *batchSize {
+						batchExec()
 					}
 				}
 			}
