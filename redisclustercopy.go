@@ -48,7 +48,7 @@ func printer(output chan string, total int64, batchSize *int) {
 		count++
 		if count%(*batchSize) == 0 {
 			msg = <-output
-			log.Printf("[%d:%d] %v", count, total, msg)
+			log.Printf("[%d:~%d] %v", count, total, msg)
 		} else {
 			<-output
 		}
