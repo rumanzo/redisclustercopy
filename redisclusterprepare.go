@@ -15,8 +15,14 @@ import (
 	"time"
 )
 
-func worker1(client *redis.ClusterClient, ctx context.Context, num chan string, ttl *int, batchSize *int, out chan bool, wg *sync.WaitGroup) {
+func worker1(client *redis.ClusterClient, ctx context.Context, num chan string, ttlInt *int, ttlrand *bool, batchSize *int, out chan bool, wg *sync.WaitGroup) {
 	defer wg.Done()
+	var ttl time.Duration
+	if *ttlrand {
+		ttl = time.Duration(rand.Intn(*ttlInt)) * time.Second
+	} else {
+		ttl = time.Duration(*ttlInt) * time.Second
+	}
 	pipeline := client.Pipeline()
 	pipeExec := func() {
 		_, err := pipeline.Exec(context.Background())
@@ -28,7 +34,7 @@ func worker1(client *redis.ClusterClient, ctx context.Context, num chan string, 
 		for i := 0; i < *batchSize; i++ {
 			select {
 			case n := <-num:
-				pipeline.Set(context.Background(), "testkey"+n, "testval"+n, time.Duration(rand.Intn(*ttl))*time.Second)
+				pipeline.Set(context.Background(), "testkey"+n, "testval"+n, ttl)
 				out <- true
 			case <-ctx.Done():
 				pipeExec()
@@ -51,7 +57,8 @@ func preparePrinter(output chan bool, total *int, batchSize *int) {
 }
 
 func main() {
-	ttl := flag.Int("maxttl", 7200, "ttl of records")
+	ttl := flag.Int("ttl", 7200, "ttl of records")
+	ttlrand := flag.Bool("ttlrand", false, "use rand[0:ttl)")
 	totalRecords := flag.Int("total", 10000000, "total records")
 	batchSize := flag.Int("batchSize", 1000, "batch size")
 	workers := flag.Int("workers", 10, "number of workers")
@@ -92,7 +99,7 @@ func main() {
 	go preparePrinter(out, totalRecords, batchSize)
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
-		go worker1(rdb, ctx, num, ttl, batchSize, out, wg)
+		go worker1(rdb, ctx, num, ttl, ttlrand, batchSize, out, wg)
 	}
 	for i := 0; i < *totalRecords; i++ {
 		num <- strconv.Itoa(i)

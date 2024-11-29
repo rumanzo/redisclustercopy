@@ -18,7 +18,7 @@ type KeyValue struct {
 	TTL   *time.Duration
 }
 
-func worker(clientDestination *redis.ClusterClient, ctx context.Context, keys chan *KeyValue, output chan string, batchSize int, wg *sync.WaitGroup) {
+func worker(clientDestination *redis.Client, ctx context.Context, keys chan *KeyValue, output chan string, batchSize int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	pipeline := clientDestination.Pipeline()
 	pipeExec := func() {
@@ -29,11 +29,10 @@ func worker(clientDestination *redis.ClusterClient, ctx context.Context, keys ch
 	}
 	for {
 		for i := 0; i < batchSize; i++ {
-			select {
-			case k := <-keys:
-				pipeline.Set(context.Background(), *k.Key, *k.Value, *k.TTL)
-				output <- fmt.Sprintf("Setled key %q with ttl %d\n", *k.Key, int((*k.TTL).Seconds()))
-			case <-ctx.Done():
+			if kv, ok := <-keys; ok {
+				pipeline.Set(context.Background(), *kv.Key, *kv.Value, *kv.TTL)
+				output <- fmt.Sprintf("Setled key %q with ttl %d\n", *kv.Key, int((*kv.TTL).Seconds()))
+			} else {
 				pipeExec()
 				return
 			}
@@ -59,7 +58,6 @@ func printer(output chan string, total int64, batchSize *int) {
 func main() {
 	redisSourceAddress := flag.String("s", "", "Redis source address")
 	redisDestinationAddress := flag.String("d", "", "Redis destination address")
-	workerCount := flag.Int("w", 10, "Number of workers")
 	batchSize := flag.Int("b", 1000, "Batch size")
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
 	flag.Parse()
@@ -87,24 +85,24 @@ func main() {
 		Addrs:    []string{*redisDestinationAddress},
 		Password: "", // no password set
 	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	dbsize, err := rdb1.DBSize(ctx).Result()
 	if err != nil {
 		fmt.Printf("Error getting DB size: %v\n", err)
 	}
-	keyVal := make(chan *KeyValue, 10*(*batchSize))
 	output := make(chan string, 10*(*batchSize))
 	wg := &sync.WaitGroup{}
-	for i := 0; i < *workerCount; i++ {
-		wg.Add(1)
-		go worker(rdb2, ctx, keyVal, output, *batchSize, wg)
-	}
 	go printer(output, dbsize, batchSize)
-	slots, err := rdb1.ClusterSlots(ctx).Result()
+	slots, err := rdb1.ClusterSlots(context.Background()).Result()
 	if err != nil {
 		fmt.Printf("Error getting cluster slots: %v\n", err)
 	}
-	err = rdb1.ForEachMaster(context.Background(), func(ctx context.Context, master *redis.Client) error {
+
+	destinationClients := map[*redis.Client]chan *KeyValue{}
+	mut := &sync.RWMutex{}
+
+	err = rdb1.ForEachMaster(ctx, func(ctx context.Context, master *redis.Client) error {
 		masterNodeID, err := master.Do(ctx, "CLUSTER", "MYID").Result()
 		if err != nil {
 			fmt.Printf("Error getting master node id: %v\n", err)
@@ -129,7 +127,19 @@ func main() {
 					output <- fmt.Sprintf("Failed to get ttl for key %q: %v\n", k, err)
 					continue
 				}
-				keyVal <- &KeyValue{Key: &k, Value: &val, TTL: &ttl}
+				mut.RLock()
+				keyClient, _ := rdb2.MasterForKey(ctx, k)
+				mut.RUnlock()
+				clientKeyValChan, exists := destinationClients[keyClient]
+				if exists {
+					clientKeyValChan <- &KeyValue{Key: &k, Value: &val, TTL: &ttl}
+				} else {
+					mut.Lock()
+					destinationClients[keyClient] = make(chan *KeyValue, 10*(*batchSize))
+					mut.Unlock()
+					wg.Add(1)
+					go worker(keyClient, ctx, destinationClients[keyClient], output, *batchSize, wg)
+				}
 			}
 			cmdsVal, cmdsTTL = map[string]*redis.StringCmd{}, map[string]*redis.DurationCmd{}
 			batchNum = 0
@@ -158,13 +168,13 @@ func main() {
 		batchExec()
 		return nil
 	})
+	for _, ch := range destinationClients {
+		close(ch)
+	}
+	cancel()
 	if err != nil {
 		fmt.Println(err)
 	}
-	for len(keyVal) > 0 {
-		time.Sleep(100 * time.Millisecond)
-	}
-	cancel()
 	wg.Wait()
 	fmt.Println("Done")
 }
